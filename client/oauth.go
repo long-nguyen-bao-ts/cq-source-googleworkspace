@@ -10,11 +10,27 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/oauth2"
 	directory "google.golang.org/api/admin/directory/v1"
 )
+
+var OAuthScopes = []string{
+	directory.AdminDirectoryCustomerReadonlyScope,
+	directory.AdminDirectoryDomainReadonlyScope,
+	directory.AdminDirectoryGroupMemberReadonlyScope,
+	directory.AdminDirectoryGroupReadonlyScope,
+	directory.AdminDirectoryOrgunitReadonlyScope,
+	directory.AdminDirectoryUserAliasReadonlyScope,
+	directory.AdminDirectoryUserReadonlyScope,
+	directory.AdminDirectoryUserschemaReadonlyScope,
+	directory.AdminDirectoryResourceCalendarReadonlyScope,
+	directory.AdminDirectoryDeviceChromeosReadonlyScope,
+	directory.AdminChromePrintersReadonlyScope,
+}
 
 type oauthSpec struct {
 	TokenFile    string `json:"token_file,omitempty"`
@@ -55,24 +71,10 @@ func (o *oauthSpec) saveTokenToFile(token *oauth2.Token) error {
 	return json.NewEncoder(f).Encode(token)
 }
 
-func (o *oauthSpec) getTokenSource(ctx context.Context, endpoint oauth2.Endpoint) (oauth2.TokenSource, error) {
-	scopes := []string{
-		directory.AdminDirectoryCustomerReadonlyScope,
-		directory.AdminDirectoryDomainReadonlyScope,
-		directory.AdminDirectoryGroupMemberReadonlyScope,
-		directory.AdminDirectoryGroupReadonlyScope,
-		directory.AdminDirectoryOrgunitReadonlyScope,
-		directory.AdminDirectoryUserAliasReadonlyScope,
-		directory.AdminDirectoryUserReadonlyScope,
-		directory.AdminDirectoryUserschemaReadonlyScope,
-		directory.AdminDirectoryResourceCalendarReadonlyScope,
-		directory.AdminDirectoryDeviceChromeosReadonlyScope,
-		directory.AdminChromePrintersReadonlyScope,
-	}
-
+func (o *oauthSpec) getTokenSource(ctx context.Context, logger zerolog.Logger, endpoint oauth2.Endpoint) (oauth2.TokenSource, error) {
 	lst, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to listen: %v", err)
 	}
 
 	config := &oauth2.Config{
@@ -80,7 +82,7 @@ func (o *oauthSpec) getTokenSource(ctx context.Context, endpoint oauth2.Endpoint
 		ClientSecret: o.ClientSecret,
 		Endpoint:     endpoint,
 		RedirectURL:  "http://" + lst.Addr().String(),
-		Scopes:       scopes,
+		Scopes:       OAuthScopes,
 	}
 
 	if len(o.TokenFile) > 0 {
@@ -88,12 +90,15 @@ func (o *oauthSpec) getTokenSource(ctx context.Context, endpoint oauth2.Endpoint
 		if err == nil {
 			return config.TokenSource(context.Background(), savedToken), nil
 		} else if o.ClientID == "" || o.ClientSecret == "" {
-			return nil, err
+			return nil, fmt.Errorf("failed to get token from file: %v", err)
 		}
 	}
 
 	b := make([]byte, 16)
-	rand.Read(b)
+	_, err = rand.Read(b)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate state: %v", err)
+	}
 	state := strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
 
 	handler := &oauthHandler{
@@ -105,7 +110,23 @@ func (o *oauthSpec) getTokenSource(ctx context.Context, endpoint oauth2.Endpoint
 
 	go func() {
 		defer srv.Close()
-		_ = exec.CommandContext(ctx, "open", config.AuthCodeURL(state, oauth2.AccessTypeOffline)).Run()
+
+		url := config.AuthCodeURL(state, oauth2.AccessTypeOffline)
+
+		switch runtime.GOOS {
+		case "windows":
+			err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		case "darwin":
+			err = exec.Command("open", url).Start()
+		case "linux":
+			err = exec.Command("xdg-open", url).Start()
+		}
+
+		if err != nil {
+			logger.Err(err).Msg("unable to open browser automatically to the authorization URL")
+			return
+		}
+
 		err = <-handler.err
 	}()
 
@@ -114,18 +135,18 @@ func (o *oauthSpec) getTokenSource(ctx context.Context, endpoint oauth2.Endpoint
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to complete OAuth authorization: %v", err)
 	}
 
 	// we have exchange token now
 	token, err := config.Exchange(ctx, handler.code, oauth2.AccessTypeOffline)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to exchange token: %v", err)
 	}
 
 	if o.TokenFile != "" {
 		if err := o.saveTokenToFile(token); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to save token to file: %v", err)
 		}
 	}
 
