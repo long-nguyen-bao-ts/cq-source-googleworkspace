@@ -2,10 +2,12 @@ package users
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/cloudquery/plugin-sdk/v4/schema"
 	"github.com/cloudquery/plugin-sdk/v4/transformers"
+	"github.com/cloudquery/plugin-sdk/v4/types"
 	"github.com/jsifuentes/cq-source-googleworkspace/client"
 	directory "google.golang.org/api/admin/directory/v1"
 )
@@ -29,6 +31,21 @@ func UsersTable() *schema.Table {
 				Type: arrow.BinaryTypes.String,
 				Resolver: func(_ context.Context, meta schema.ClientMeta, r *schema.Resource, c schema.Column) error {
 					return r.Set(c.Name, r.Item.(*directory.User).Name.FamilyName)
+				},
+			},
+			{
+				Name: "organizations",
+				Type: types.NewJSONType(),
+				Resolver: func(_ context.Context, meta schema.ClientMeta, r *schema.Resource, c schema.Column) error {
+					user := r.Item.(*directory.User)
+					if orgs, ok := user.Organizations.([]interface{}); ok {
+						orgsJSON, err := json.Marshal(orgs)
+						if err != nil {
+							return err
+						}
+						return r.Set(c.Name, string(orgsJSON))
+					}
+					return nil
 				},
 			},
 		},
