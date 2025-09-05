@@ -24,6 +24,7 @@ func GroupMembersTable() *schema.Table {
 				Resolver: func(_ context.Context, meta schema.ClientMeta, r *schema.Resource, c schema.Column) error {
 					return r.Set(c.Name, r.Parent.Item.(*directory.Group).Id)
 				},
+				PrimaryKey: true,
 			},
 			{
 				Name: "group_email",
